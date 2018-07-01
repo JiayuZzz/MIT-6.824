@@ -2,6 +2,10 @@ package mapreduce
 
 import (
 	"hash/fnv"
+	"io/ioutil"
+	"os"
+	"log"
+	"encoding/json"
 )
 
 func doMap(
@@ -53,6 +57,22 @@ func doMap(
 	//
 	// Your code here (Part I).
 	//
+	contents, _ := ioutil.ReadFile(inFile)
+	KVs := mapF(inFile, string(contents))
+
+	encs := make([]*json.Encoder, nReduce)
+	for i := 0; i < nReduce; i++ {
+		file, err := os.Create(reduceName(jobName, mapTask, i))
+		if err != nil {
+			log.Fatal("map task open imtermediate file error")
+		}
+		defer file.Close()
+		encs[i] = json.NewEncoder(file)
+	}
+	for _, kv := range KVs {
+		r := ihash(kv.Key) % nReduce
+		encs[r].Encode(&kv)
+	}
 }
 
 func ihash(s string) int {
