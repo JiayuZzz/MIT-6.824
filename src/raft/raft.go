@@ -17,13 +17,30 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"math/rand"
+	"sync"
+	"time"
+)
 import "labrpc"
 
 // import "bytes"
 // import "labgob"
 
+type Role int32
 
+const (
+	_ Role = iota
+	Leader
+	Candidate
+	Follower
+)
+
+const (
+	MIN_INTERVAL       = 250
+	MAX_INTERVAL       = 400
+	BROADCAST_INTERVAL = 40
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -55,6 +72,17 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	// for all servers
+	currentTerm int
+	votedFor    int
+	role        Role
+
+	electionTimer *time.Timer
+
+	resetTimerCH chan interface{}
+
+	// for candidate
+	votedCnt int
 }
 
 // return currentTerm and whether this server
@@ -64,9 +92,14 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	term = rf.currentTerm
+	isleader = rf.role==Leader
+
 	return term, isleader
 }
-
 
 //
 // save Raft's persistent state to stable storage,
@@ -83,7 +116,6 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 }
-
 
 //
 // restore previously persisted state.
@@ -107,8 +139,15 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
+// AppendEntries RPC arguments
+type AppendEntriesArgs struct {
+	Term int
+}
 
-
+// AppendEntries RPC reply
+type AppendEntriesReply struct {
+	Term int
+}
 
 //
 // example RequestVote RPC arguments structure.
@@ -116,6 +155,8 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	CandidateID int
+	Term        int
 }
 
 //
@@ -124,6 +165,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Granted bool
+	Term    int
 }
 
 //
@@ -131,6 +174,48 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	//fmt.Printf("%v requested vote from %v\n",rf.me,args.CandidateID)
+
+	if args.Term<rf.currentTerm {
+		reply.Granted = false
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	if args.Term > rf.currentTerm {
+		rf.votedFor = args.CandidateID
+		rf.currentTerm = args.Term
+	}
+
+	if rf.votedFor==args.CandidateID || rf.votedFor == -1 {
+		//fmt.Printf("%v grant vote to %v\n",rf.me,args.CandidateID)
+		reply.Granted = true
+	} else {
+		reply.Granted = false             // already have voted for another candidate
+	}
+
+	reply.Term = rf.currentTerm
+}
+
+// AppendEntries RPC handler
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term<rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
+	}
+	rf.resetTimerCH <- struct{}{}
+
+	if args.Term>rf.currentTerm {
+		rf.currentTerm = args.Term
+	}
+
+	if rf.role!=Follower {
+		rf.setRole(Follower)
+	}
 }
 
 //
@@ -167,6 +252,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -188,7 +277,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -222,10 +310,116 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.setRole(Follower)
+	rf.resetTimer()
+	rf.votedFor = -1
+	rf.resetTimerCH = make(chan interface{})
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	//fmt.Printf("%v maked\n",rf.me)
+	go rf.electionDaemon()
 
 	return rf
+}
+
+func (rf *Raft) resetTimer() {
+	if rf.electionTimer == nil {
+		rf.electionTimer = time.NewTimer(time.Millisecond*time.Duration(rand.Intn(MAX_INTERVAL - MIN_INTERVAL)+MIN_INTERVAL))
+	} else {
+		rf.electionTimer.Reset(time.Millisecond*time.Duration(rand.Intn(MAX_INTERVAL - MIN_INTERVAL)+MIN_INTERVAL))
+	}
+}
+
+func (rf *Raft) setRole(role Role) {
+	rf.role = role
+}
+
+func (rf *Raft) electionDaemon() {
+	//fmt.Printf("%v daemon\n",rf.me)
+	for {
+		select {
+		case <-rf.resetTimerCH:
+			rf.resetTimer()
+		case <-rf.electionTimer.C:
+			rf.resetTimer()
+			go rf.startElection()
+		}
+	}
+}
+
+func (rf *Raft) startElection() {
+	rf.mu.Lock()
+	rf.votedCnt = 0
+	rf.setRole(Candidate)
+	rf.currentTerm += 1
+	rf.votedFor = rf.me
+	args := RequestVoteArgs{rf.me, rf.currentTerm}
+	//fmt.Printf("%v start elect for term %v\n",rf.me, rf.currentTerm)
+
+	rf.mu.Unlock() // no need lock afterward
+
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+
+		go func(server int) {
+			reply := RequestVoteReply{}
+			if rf.sendRequestVote(server, &args, &reply) {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if rf.role == Candidate { // maybe this election already done
+					if reply.Granted {
+						rf.votedCnt += 1
+						if rf.votedCnt == len(rf.peers)/2 { // already vote for itself
+							//fmt.Printf("%v became leader for term %v\n",rf.me, rf.currentTerm)
+							rf.setRole(Leader)
+							rf.electionTimer.Stop()                // stop timer until expired
+							go rf.broadcast() // broadcast as leader
+						}
+					} else {
+						if reply.Term > rf.currentTerm {
+							rf.currentTerm = reply.Term
+							rf.setRole(Follower)
+							rf.resetTimerCH <- struct {}{}
+						}
+					}
+				}
+			}
+		}(i)
+	}
+}
+
+// Leader periodically broadcasts
+func (rf *Raft) broadcast() {
+	msg := AppendEntriesArgs{}
+	for {
+		if rf.role!=Leader {
+			break
+		}
+		msg.Term = rf.currentTerm
+		for i := range rf.peers {
+			if i == rf.me {
+				continue
+			}
+
+			go func(server int) {
+				reply := AppendEntriesReply{}
+				if rf.sendAppendEntries(server, &msg, &reply) {
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
+					if rf.role == Leader {
+						if reply.Term > rf.currentTerm {
+							rf.setRole(Follower)
+							rf.resetTimerCH <- struct{}{}
+							rf.currentTerm = reply.Term
+						}
+					}
+				}
+			}(i)
+		}
+
+		time.Sleep(BROADCAST_INTERVAL*time.Millisecond)
+	}
 }
