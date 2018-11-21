@@ -175,6 +175,8 @@ type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	CandidateID int
 	Term        int
+	LastLogIndex int   // index of candidate's last LogEntry
+	LastLogTerm  int
 }
 
 //
@@ -195,10 +197,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//fmt.Printf("%v requested vote from %v\n",rf.me,args.CandidateID)
+	reply.Granted = false
+	reply.Term = rf.currentTerm
+	if args.Term<rf.currentTerm  {
+		DPrintf("%v reject %v because expired\n",rf.me,args.CandidateID)
+		return
+	}
 
-	if args.Term<rf.currentTerm {
-		reply.Granted = false
-		reply.Term = rf.currentTerm
+	var upToDate bool
+	lastIndex := len(rf.log)-1
+	if rf.log[lastIndex].Term < args.LastLogTerm {
+		upToDate = true
+	} else if rf.log[lastIndex].Term > args.LastLogTerm {
+		upToDate = false
+	} else {
+		upToDate = args.LastLogIndex >= lastIndex
+	}
+
+	if !upToDate {
+		DPrintf("%v reject %v because log is not up-to-date\n",rf.me,args.CandidateID)
 		return
 	}
 
@@ -207,11 +224,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 	}
 
+	// if already have voted for another candidate
 	if rf.votedFor==args.CandidateID || rf.votedFor == -1 {
 		//fmt.Printf("%v grant vote to %v\n",rf.me,args.CandidateID)
 		reply.Granted = true
-	} else {
-		reply.Granted = false             // already have voted for another candidate
 	}
 
 	reply.Term = rf.currentTerm
@@ -412,7 +428,8 @@ func (rf *Raft) startElection() {
 	rf.setRole(Candidate)
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
-	args := RequestVoteArgs{rf.me, rf.currentTerm}
+	lastIndex:=len(rf.log)-1
+	args := RequestVoteArgs{rf.me, rf.currentTerm, lastIndex, rf.log[lastIndex].Term}
 	//fmt.Printf("%v start elect for term %v\n",rf.me, rf.currentTerm)
 
 	rf.mu.Unlock() // no need lock afterward
@@ -515,6 +532,7 @@ func (rf *Raft) broadcast() {
 	}
 }
 
+// leader try to commit new entries
 func (rf *Raft) tryCommit() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
