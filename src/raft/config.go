@@ -469,6 +469,7 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
+	fmt.Printf("test one run out of time\n")
 	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	return -1
 }

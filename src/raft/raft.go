@@ -266,8 +266,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 		if args.Entries!=nil {
 			rf.log = rf.log[0:args.PrevLogIndex+1]  // delete conflict entries
-			rf.log = append(rf.log, args.Entries[0])
-			last+=1
+			rf.log = append(rf.log, args.Entries...)
+			last+=len(args.Entries)
 			DPrintf("server %v receive entry term %v, at index: %v\n", rf.me, args.Term, len(rf.log)-1)
 		}
 	}
@@ -474,19 +474,19 @@ func (rf *Raft) startElection() {
 }
 
 // start Append entries rpc
-func (rf* Raft) startAppendEntries(server int, args AppendEntriesArgs) {
+func (rf* Raft) startAppendEntries(server int, args *AppendEntriesArgs) {
 	reply := AppendEntriesReply{}
-	if rf.sendAppendEntries(server, &args, &reply) {
+	if rf.sendAppendEntries(server, args, &reply) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		if rf.role == Leader {
 			if reply.Success {
 				// update index state and try to commit
 				if args.Entries!=nil{
-					rf.matchIndex[server] = rf.nextIndex[server]
-					rf.nextIndex[server] += 1 // update next index
+					rf.matchIndex[server] = rf.nextIndex[server]+len(args.Entries)-1
+					rf.nextIndex[server] += len(args.Entries) // update next index
 					go rf.tryCommit()
-					DPrintf("%v match at %v\n",server, rf.matchIndex[server])
+					DPrintf("server %v match at %v\n",server, rf.matchIndex[server])
 				}
 			} else {
 				if reply.Term > rf.currentTerm {  // Leader expired
@@ -524,15 +524,15 @@ func (rf *Raft) broadcast() {
 			}
 
 			if rf.nextIndex[i] < len(rf.log) {
-				// Todo: append more entries
-				args.Entries = append(args.Entries, rf.log[rf.nextIndex[i]])
+				// append multiple entries
+				args.Entries = append(args.Entries, rf.log[rf.nextIndex[i]:]...)
 				//preIndex := rf.nextIndex[i] - 1
 				//args.PrevLogIndex = preIndex
 				//args.PrevLogTerm = rf.log[preIndex].Term
 				DPrintf("leader %v to send in term %v, pre index %v, to server %v\n", rf.me, args.Entries[0].Term,preIndex, i)
 			}
 
-			go rf.startAppendEntries(i, args)
+			go rf.startAppendEntries(i, &args)
 		}
 		rf.mu.Unlock()
 
