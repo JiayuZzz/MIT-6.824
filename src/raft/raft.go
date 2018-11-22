@@ -19,6 +19,7 @@ package raft
 
 import (
 	"bytes"
+	"fmt"
 	"labgob"
 	"math/rand"
 	"sort"
@@ -186,6 +187,7 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term int
 	Success bool
+	FirstIndex int // first index of unmatched term
 }
 
 //
@@ -293,6 +295,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			last+=len(args.Entries)
 			DPrintf("server %v receive entry term %v, at index: %v\n", rf.me, args.Term, len(rf.log)-1)
 		}
+	} else {
+		// to find nextIndex
+		var index int
+		if args.PrevLogIndex<len(rf.log) {
+			// search the first entry on unmatched term
+			index = args.PrevLogIndex
+			term := rf.log[index].Term
+			for term == rf.log[index-1].Term && index > 0 {
+				index -= 1
+			}
+		} else {
+			index = len(rf.log)
+		}
+		reply.FirstIndex = index
 	}
 
 	if args.LeaderCommit > rf.commitIndex && prevEntryMatch {
@@ -519,7 +535,7 @@ func (rf* Raft) startAppendEntries(server int, args *AppendEntriesArgs) {
 					rf.currentTerm = reply.Term
 					rf.persist()
 				} else {                          // Try previous entry next time
-					rf.nextIndex[server] -= 1
+					rf.nextIndex[server] = reply.FirstIndex
 				}
 			}
 		}
@@ -539,6 +555,9 @@ func (rf *Raft) broadcast() {
 			}
 
 			preIndex := rf.nextIndex[i] - 1
+			if preIndex< 0 {
+				fmt.Println("<0!")
+			}
 
 			args := AppendEntriesArgs{
 				rf.currentTerm,
