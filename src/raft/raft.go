@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"bytes"
+	"labgob"
 	"math/rand"
 	"sort"
 	"sync"
@@ -128,6 +130,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	buffer := new(bytes.Buffer)
+	e := labgob.NewEncoder(buffer)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := buffer.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -150,6 +159,18 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	buffer := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(buffer)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if decoder.Decode(&currentTerm)!=nil || decoder.Decode(&votedFor)!=nil || decoder.Decode(&log)!=nil {
+		panic("decode error")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 // AppendEntries RPC arguments
@@ -196,6 +217,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	//fmt.Printf("%v requested vote from %v\n",rf.me,args.CandidateID)
 	reply.Granted = false
 	reply.Term = rf.currentTerm
@@ -239,6 +261,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer 	rf.persist()
 	// success only if leader is valid and prevEntry matched
 	reply.Success = false
 
@@ -343,10 +366,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 		rf.matchIndex[rf.me] = len(rf.log)
 		rf.log = append(rf.log,LogEntry{rf.currentTerm, command})
+		rf.persist()
 	} else {
 		isLeader = false
 	}
-
 	return index, term, isLeader
 }
 
@@ -436,7 +459,7 @@ func (rf *Raft) startElection() {
 	lastIndex:=len(rf.log)-1
 	args := RequestVoteArgs{rf.me, rf.currentTerm, lastIndex, rf.log[lastIndex].Term}
 	//fmt.Printf("%v start elect for term %v\n",rf.me, rf.currentTerm)
-
+	rf.persist()
 	rf.mu.Unlock() // no need lock afterward
 
 	for i := range rf.peers {
@@ -462,9 +485,10 @@ func (rf *Raft) startElection() {
 						}
 					} else {
 						if reply.Term > rf.currentTerm {
-							rf.currentTerm = reply.Term
 							rf.setRole(Follower)
 							rf.resetTimerCH <- struct {}{}
+							rf.currentTerm = reply.Term
+							rf.persist()
 						}
 					}
 				}
@@ -493,6 +517,7 @@ func (rf* Raft) startAppendEntries(server int, args *AppendEntriesArgs) {
 					rf.setRole(Follower)
 					rf.resetTimerCH <- struct{}{}
 					rf.currentTerm = reply.Term
+					rf.persist()
 				} else {                          // Try previous entry next time
 					rf.nextIndex[server] -= 1
 				}
