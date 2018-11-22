@@ -41,8 +41,8 @@ const (
 )
 
 const (
-	MIN_INTERVAL       = 250
-	MAX_INTERVAL       = 400
+	MIN_INTERVAL       = 200
+	MAX_INTERVAL       = 500
 	BROADCAST_INTERVAL = 40
 )
 
@@ -171,6 +171,10 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		if len(rf.log) == 0 {
+			//rf.log = append(rf.log, LogEntry{0,nil})
+			fmt.Printf("restored a empty log\n")
+		}
 	}
 }
 
@@ -246,17 +250,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// if candidate's term is greater, grant
 	if args.Term > rf.currentTerm {
-		rf.votedFor = args.CandidateID
+		rf.votedFor = -1
 		rf.currentTerm = args.Term
+		reply.Term = rf.currentTerm
 	}
 
-	// if already have voted for another candidate
-	if rf.votedFor==args.CandidateID || rf.votedFor == -1 {
+	// if don't have voted for another candidate yet
+	if rf.votedFor == -1 {
 		//fmt.Printf("%v grant vote to %v\n",rf.me,args.CandidateID)
+		rf.resetTimerCH<- struct {}{}
+		rf.setRole(Follower)
 		reply.Granted = true
+		rf.votedFor = args.CandidateID
 	}
-
-	reply.Term = rf.currentTerm
 }
 
 // AppendEntries RPC handler
@@ -266,6 +272,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer 	rf.persist()
 	// success only if leader is valid and prevEntry matched
 	reply.Success = false
+	reply.FirstIndex = args.PrevLogIndex+1  // default
 
 	if args.Term<rf.currentTerm {
 		reply.Term = rf.currentTerm
@@ -302,12 +309,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// search the first entry on unmatched term
 			index = args.PrevLogIndex
 			term := rf.log[index].Term
-			for term == rf.log[index-1].Term && index > 0 {
+			for term == rf.log[index-1].Term && index > 1 {
 				index -= 1
 			}
 		} else {
 			index = len(rf.log)
 		}
+
 		reply.FirstIndex = index
 	}
 
@@ -492,7 +500,6 @@ func (rf *Raft) startElection() {
 					if reply.Granted {
 						rf.votedCnt += 1
 						if rf.votedCnt == len(rf.peers)/2 { // already vote for itself
-							//fmt.Printf("%v became leader for term %v\n",rf.me, rf.currentTerm)
 							rf.electionTimer.Stop()                // stop timer until expired
 							DPrintf("server %v become leader\n",rf.me)
 							rf.setRole(Leader)
@@ -522,12 +529,10 @@ func (rf* Raft) startAppendEntries(server int, args *AppendEntriesArgs) {
 		if rf.role == Leader {
 			if reply.Success {
 				// update index state and try to commit
-				if args.Entries!=nil{
-					rf.matchIndex[server] = rf.nextIndex[server]+len(args.Entries)-1
-					rf.nextIndex[server] += len(args.Entries) // update next index
-					go rf.tryCommit()
-					DPrintf("server %v match at %v\n",server, rf.matchIndex[server])
-				}
+				rf.matchIndex[server] = args.PrevLogIndex+len(args.Entries)
+				rf.nextIndex[server] += len(args.Entries) // update next index
+				go rf.tryCommit()
+				DPrintf("server %v match at %v\n",server, rf.matchIndex[server])
 			} else {
 				if reply.Term > rf.currentTerm {  // Leader expired
 					rf.setRole(Follower)
@@ -536,6 +541,9 @@ func (rf* Raft) startAppendEntries(server int, args *AppendEntriesArgs) {
 					rf.persist()
 				} else {                          // Try previous entry next time
 					rf.nextIndex[server] = reply.FirstIndex
+					if rf.nextIndex[server] <=0 {
+						fmt.Printf("next index <0!\n")
+					}
 				}
 			}
 		}
@@ -545,35 +553,32 @@ func (rf* Raft) startAppendEntries(server int, args *AppendEntriesArgs) {
 // Leader periodically broadcasts
 func (rf *Raft) broadcast() {
 	for {
+		rf.mu.Lock()
 		if rf.role!=Leader {
+			rf.mu.Unlock()
 			return
 		}
-		rf.mu.Lock()
 		for i := range rf.peers {
 			if i == rf.me {
 				continue
 			}
 
-			preIndex := rf.nextIndex[i] - 1
-			if preIndex< 0 {
-				fmt.Println("<0!")
-			}
+			preIndex := min(rf.nextIndex[i]-1,len(rf.log)-1)
+			preTerm := rf.log[preIndex].Term
+			//}
 
 			args := AppendEntriesArgs{
 				rf.currentTerm,
 				nil,
 				rf.commitIndex,
 				preIndex,
-				rf.log[preIndex].Term,
+				preTerm,
 			}
 
 			if rf.nextIndex[i] < len(rf.log) {
 				// append multiple entries
 				args.Entries = append(args.Entries, rf.log[rf.nextIndex[i]:]...)
-				//preIndex := rf.nextIndex[i] - 1
-				//args.PrevLogIndex = preIndex
-				//args.PrevLogTerm = rf.log[preIndex].Term
-				DPrintf("leader %v to send in term %v, pre index %v, to server %v\n", rf.me, args.Entries[0].Term,preIndex, i)
+				//DPrintf("leader %v to send in term %v, pre index %v, to server %v\n", rf.me, args.Entries[0].Term,preIndex, i)
 			}
 
 			go rf.startAppendEntries(i, &args)
@@ -593,7 +598,10 @@ func (rf *Raft) tryCommit() {
 	sort.Ints(matchState)
 
 	majority := matchState[len(matchState)/2]  // match index of majority
-	rf.commitToIndex(majority)
+	// only commit current term's entry
+	if rf.log[majority].Term == rf.currentTerm {
+		rf.commitToIndex(majority)
+	}
 }
 
 // commit index and all indices preceding index
@@ -606,8 +614,8 @@ func (rf *Raft) commitToIndex(index int) {
 				rf.log[i].Command,
 				i,
 			}
-			rf.applyCh<-msg
 			DPrintf("server %v set commit to index %v", rf.me, rf.commitIndex)
+			rf.applyCh<-msg
 		}
 	}
 }
