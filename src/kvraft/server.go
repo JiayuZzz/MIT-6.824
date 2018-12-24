@@ -1,14 +1,18 @@
 package raftkv
 
 import (
+	"fmt"
 	"labgob"
 	"labrpc"
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
 const Debug = 0
+
+const TIMEOUT = 1000  // operation timeout
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -17,11 +21,13 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Operation string
+	Key    string
+	Value  string
 }
 
 type KVServer struct {
@@ -33,15 +39,77 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	db       map[string]string
+	notifyCH map[int]chan bool // notify command is applied
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	op := Op{"Get", args.Key, ""}
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+	reply.WrongLeader = false
+
+	timeout := time.NewTimer(time.Millisecond*time.Duration(TIMEOUT))
+	//fmt.Printf("get lock\n")
+	kv.mu.Lock()
+	notify ,ok := kv.notifyCH[index]
+	if !ok {
+		notify = make(chan bool)
+		kv.notifyCH[index] = notify
+	}
+	kv.mu.Unlock()
+	select {
+	case <- timeout.C:
+		reply.Err = "timeout"
+	case valid := <- notify:
+		//fmt.Printf("notified get")
+		if valid {
+			kv.mu.Lock()
+			reply.Value = kv.db[args.Key]
+			kv.mu.Unlock()
+			//fmt.Printf("return %v %v\n",args.Key, reply.Value)
+		} else {
+			reply.Err = "append error"
+		}
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	op := Op{args.Op, args.Key, args.Value}
+	//fmt.Printf("try %v %v\n",op.Key,op.Value)
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.WrongLeader = true
+		//fmt.Printf("%v is not leader\n",kv.me)
+		return
+	}
+	reply.WrongLeader = false
+
+	timeout := time.NewTimer(time.Millisecond*time.Duration(TIMEOUT))
+
+	kv.mu.Lock()
+	notify ,ok := kv.notifyCH[index]
+	if !ok {
+		notify = make(chan bool)
+		kv.notifyCH[index] = notify
+	}
+	kv.mu.Unlock()
+	select {
+	case <- timeout.C:
+		reply.Err = "timeout"
+		fmt.Printf("%v timeout\n",kv.me)
+	case valid := <- notify:
+		//fmt.Printf("%v notify put\n",kv.me)
+		if !valid {
+			fmt.Printf("%v append error\n",kv.me)
+			reply.Err = "append error"
+		}
+	}
 }
 
 //
@@ -82,8 +150,37 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.notifyCH = make(map[int]chan bool)
+	kv.db = make(map[string]string)
 
 	// You may need initialization code here.
 
+	go kv.applyDaemon()
+
 	return kv
+}
+
+func (kv *KVServer) applyDaemon() {
+	for {
+		msg := <-kv.applyCh
+		kv.mu.Lock()
+		if ch, ok := kv.notifyCH[msg.CommandIndex]; ok {
+			ch <- msg.CommandValid
+		}
+
+		if msg.CommandValid {
+			op := msg.Command.(Op)
+			switch op.Operation {
+			case "Get":
+				kv.mu.Unlock()
+				continue      // get op done by leader
+			case "Put":
+				//fmt.Printf("%v put %v %v\n", kv.me, op.Key, op.Value)
+				kv.db[op.Key] = op.Value
+			case "Append":
+				kv.db[op.Key] += op.Value
+			}
+		}
+		kv.mu.Unlock()
+	}
 }
