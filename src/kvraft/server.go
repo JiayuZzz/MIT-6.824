@@ -28,6 +28,8 @@ type Op struct {
 	Operation string
 	Key    string
 	Value  string
+	Client int
+	Seq    uint64
 }
 
 type KVServer struct {
@@ -41,11 +43,20 @@ type KVServer struct {
 	// Your definitions here.
 	db       map[string]string
 	notifyCH map[int]chan bool // notify command is applied
+	lastApply map[int]uint64
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	op := Op{"Get", args.Key, ""}
+
+	if seq,ok := kv.lastApply[args.Client];ok&&seq==args.Seq {
+		reply.WrongLeader = false
+		reply.Err = ""
+		reply.Value = kv.db[args.Key]
+		return
+	}
+
+	op := Op{"Get", args.Key, "", args.Client, args.Seq}
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.WrongLeader = true
@@ -80,7 +91,15 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	op := Op{args.Op, args.Key, args.Value}
+
+	// this request is already applied before
+	if seq,ok := kv.lastApply[args.Client];ok&&seq==args.Seq {
+		reply.WrongLeader = false
+		reply.Err = ""
+		return
+	}
+
+	op := Op{args.Op, args.Key, args.Value, args.Client, args.Seq}
 	//fmt.Printf("try %v %v\n",op.Key,op.Value)
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
@@ -152,6 +171,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.notifyCH = make(map[int]chan bool)
 	kv.db = make(map[string]string)
+	kv.lastApply = make(map[int]uint64)
 
 	// You may need initialization code here.
 
@@ -170,15 +190,16 @@ func (kv *KVServer) applyDaemon() {
 
 		if msg.CommandValid {
 			op := msg.Command.(Op)
-			switch op.Operation {
-			case "Get":
-				kv.mu.Unlock()
-				continue      // get op done by leader
-			case "Put":
-				//fmt.Printf("%v put %v %v\n", kv.me, op.Key, op.Value)
-				kv.db[op.Key] = op.Value
-			case "Append":
-				kv.db[op.Key] += op.Value
+			if seq, ok:=kv.lastApply[op.Client];!ok||seq!=op.Seq {
+				switch op.Operation {
+				case "Get":
+				case "Put":
+					//fmt.Printf("%v put %v %v\n", kv.me, op.Key, op.Value)
+					kv.db[op.Key] = op.Value
+				case "Append":
+					kv.db[op.Key] += op.Value
+				}
+				kv.lastApply[op.Client] = op.Seq
 			}
 		}
 		kv.mu.Unlock()

@@ -6,11 +6,14 @@ import (
 import "crypto/rand"
 import "math/big"
 
+var clientId int
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	leader  int
+	id      int
+	seq     uint64
 }
 
 func nrand() int64 {
@@ -25,6 +28,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.leader = 0
+	ck.id = clientId
+	clientId++
+	ck.seq = 0
 	return ck
 }
 
@@ -42,7 +48,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
-	args := GetArgs{key}
+	args := GetArgs{key, ck.id, ck.seq}
+	ck.seq++
 	// until sent to right leader
 	leader := ck.leader
 	for {
@@ -75,7 +82,8 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	args := PutAppendArgs{key, value, op}
+	args := PutAppendArgs{key, value, op, ck.id, ck.seq}
+	ck.seq++
 	// until set to right leader
 	leader := ck.leader
 	for {
