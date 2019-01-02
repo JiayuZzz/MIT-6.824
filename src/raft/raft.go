@@ -383,7 +383,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	//fmt.Printf("%v start to get lock\n",rf.me)
 	rf.mu.Lock()
+	//fmt.Printf("%v start got lock\n",rf.me)
 	defer rf.mu.Unlock()
 	if rf.role == Leader {
 		index = len(rf.log)
@@ -615,7 +617,9 @@ func (rf *Raft) commitToIndex(index int) {
 				i,
 			}
 			DPrintf("server %v set commit to index %v", rf.me, rf.commitIndex)
+			//fmt.Printf("%v send msg to channel\n",rf.me)
 			rf.applyCh<-msg
+			//fmt.Printf("%v send msg to channel done\n",rf.me)
 		}
 	}
 }

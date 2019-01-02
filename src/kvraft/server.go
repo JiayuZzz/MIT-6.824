@@ -1,7 +1,6 @@
 package raftkv
 
 import (
-	"fmt"
 	"labgob"
 	"labrpc"
 	"log"
@@ -49,15 +48,20 @@ type KVServer struct {
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 
-	if seq,ok := kv.lastApply[args.Client];ok&&seq==args.Seq {
-		reply.WrongLeader = false
-		reply.Err = ""
-		reply.Value = kv.db[args.Key]
-		return
-	}
+	//kv.mu.Lock()
+	//if seq,ok := kv.lastApply[args.Client];ok&&seq==args.Seq {
+	//	reply.WrongLeader = false
+	//	reply.Err = ""
+	//	reply.Value = kv.db[args.Key]
+	//	kv.mu.Unlock()
+	//	return
+	//}
+	//kv.mu.Unlock()
 
 	op := Op{"Get", args.Key, "", args.Client, args.Seq}
+	//fmt.Printf("%v start Get\n",kv.me)
 	index, _, isLeader := kv.rf.Start(op)
+	//fmt.Printf("%v Get after append to leader\n",kv.me)
 	if !isLeader {
 		reply.WrongLeader = true
 		return
@@ -65,11 +69,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	reply.WrongLeader = false
 
 	timeout := time.NewTimer(time.Millisecond*time.Duration(TIMEOUT))
-	//fmt.Printf("get lock\n")
+	//fmt.Printf("%v get to aquire lock\n",kv.me)
 	kv.mu.Lock()
+	//fmt.Printf("%v get got lock\n",kv.me)
 	notify ,ok := kv.notifyCH[index]
 	if !ok {
-		notify = make(chan bool)
+		notify = make(chan bool, 1)
 		kv.notifyCH[index] = notify
 	}
 	kv.mu.Unlock()
@@ -87,21 +92,26 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Err = "append error"
 		}
 	}
+	//fmt.Printf("%v return get\n",kv.me)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 
 	// this request is already applied before
-	if seq,ok := kv.lastApply[args.Client];ok&&seq==args.Seq {
-		reply.WrongLeader = false
-		reply.Err = ""
-		return
-	}
+	//kv.mu.Lock()
+	//if seq,ok := kv.lastApply[args.Client];ok&&seq==args.Seq {
+	//	reply.WrongLeader = false
+	//	reply.Err = ""
+	//	kv.mu.Unlock()
+	//	return
+	//}
+	//kv.mu.Unlock()
 
 	op := Op{args.Op, args.Key, args.Value, args.Client, args.Seq}
-	//fmt.Printf("try %v %v\n",op.Key,op.Value)
+	//fmt.Printf("server %v try %v %v %v\n",kv.me, op.Operation, op.Key,op.Value)
 	index, _, isLeader := kv.rf.Start(op)
+	//fmt.Printf("server %v put after start\n",kv.me)
 	if !isLeader {
 		reply.WrongLeader = true
 		//fmt.Printf("%v is not leader\n",kv.me)
@@ -111,24 +121,29 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	timeout := time.NewTimer(time.Millisecond*time.Duration(TIMEOUT))
 
+	//fmt.Printf("%v try lock\n",kv.me)
 	kv.mu.Lock()
+	//fmt.Printf("%v lock success\n",kv.me)
+
 	notify ,ok := kv.notifyCH[index]
 	if !ok {
-		notify = make(chan bool)
+		notify = make(chan bool, 1)
 		kv.notifyCH[index] = notify
 	}
 	kv.mu.Unlock()
+	//fmt.Printf("%v wait notify\n",kv.me)
 	select {
 	case <- timeout.C:
 		reply.Err = "timeout"
-		fmt.Printf("%v timeout\n",kv.me)
+		//fmt.Printf("%v timeout\n",kv.me)
 	case valid := <- notify:
 		//fmt.Printf("%v notify put\n",kv.me)
 		if !valid {
-			fmt.Printf("%v append error\n",kv.me)
+			//fmt.Printf("%v append error\n",kv.me)
 			reply.Err = "append error"
 		}
 	}
+	//fmt.Printf("%v put return\n",kv.me)
 }
 
 //
@@ -182,11 +197,19 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 func (kv *KVServer) applyDaemon() {
 	for {
+		//fmt.Printf("%v get msg from channel\n",kv.me)
 		msg := <-kv.applyCh
+		//fmt.Printf("%v got msg from channel\n",kv.me)
 		kv.mu.Lock()
+		//fmt.Printf("%v got lock after got msg\n",kv.me)
 		if ch, ok := kv.notifyCH[msg.CommandIndex]; ok {
-			ch <- msg.CommandValid
+			if len(ch)==0 {
+				ch <- msg.CommandValid
+			} else {
+				delete(kv.notifyCH, msg.CommandIndex)    // the waiting request already returned
+			}
 		}
+		//fmt.Printf("%v before command valid\n", kv.me)
 
 		if msg.CommandValid {
 			op := msg.Command.(Op)
@@ -203,5 +226,6 @@ func (kv *KVServer) applyDaemon() {
 			}
 		}
 		kv.mu.Unlock()
+		//fmt.Printf("%v unlock after apply\n",kv.me)
 	}
 }

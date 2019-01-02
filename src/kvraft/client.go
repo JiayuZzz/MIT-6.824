@@ -54,19 +54,17 @@ func (ck *Clerk) Get(key string) string {
 	leader := ck.leader
 	for {
 		var reply GetReply
+		//fmt.Printf("now client %v call %v to get %v\n",ck.id, leader, key)
 		if ck.servers[leader].Call("KVServer.Get", &args, &reply) {
-			if reply.WrongLeader {
-				leader = (leader + 1) % len(ck.servers)
-				//fmt.Printf("set leader to %v\n",leader)
-				continue
-			} else {
+			//fmt.Printf("client %v get return from %v\n",ck.id,leader)
+			if !reply.WrongLeader {
 				ck.leader = leader
-				if reply.Err != "" {
-					continue
+				if reply.Err=="" {
+					return reply.Value
 				}
 			}
-			return reply.Value
 		}
+		leader = (leader +1) % len(ck.servers)    // can't reach leader
 	}
 }
 
@@ -88,20 +86,17 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	leader := ck.leader
 	for {
 		var reply PutAppendReply
+		//fmt.Printf("now client %v call %v to put %v %v\n",ck.id, leader, key, value)
 		if ck.servers[leader].Call("KVServer.PutAppend", &args, &reply) {
-			//fmt.Printf("send request to %v\n",ck.leader)
-			if reply.WrongLeader {
-				leader = (leader + 1) % len(ck.servers)
-				//fmt.Printf("set leader to %v\n",leader)
-				continue
-			} else {
+			//fmt.Printf("get put reply from %v\n",ck.leader)
+			if !reply.WrongLeader {
 				ck.leader = leader
-				if reply.Err != "" {
-					continue
+				if reply.Err=="" {
+					return
 				}
 			}
-			break
 		}
+		leader = (leader +1) % len(ck.servers)    // can't reach leader
 	}
 }
 
