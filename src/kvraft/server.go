@@ -11,7 +11,7 @@ import (
 
 const Debug = 0
 
-const TIMEOUT = 1000  // operation timeout
+const TIMEOUT time.Duration = 1000 // operation timeout
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -25,10 +25,10 @@ type Op struct {
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 	Operation string
-	Key    string
-	Value  string
-	Client int
-	Seq    uint64
+	Key       string
+	Value     string
+	Client    int
+	Seq       uint64
 }
 
 type KVServer struct {
@@ -40,110 +40,60 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	db       map[string]string
-	notifyCH map[int]chan bool // notify command is applied
+	db        map[string]string
+	notifyCH  map[int]chan bool // notify command is applied
 	lastApply map[int]uint64
 }
 
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
-
-	//kv.mu.Lock()
-	//if seq,ok := kv.lastApply[args.Client];ok&&seq==args.Seq {
-	//	reply.WrongLeader = false
-	//	reply.Err = ""
-	//	reply.Value = kv.db[args.Key]
-	//	kv.mu.Unlock()
-	//	return
-	//}
-	//kv.mu.Unlock()
-
-	op := Op{"Get", args.Key, "", args.Client, args.Seq}
-	//fmt.Printf("%v start Get\n",kv.me)
-	index, _, isLeader := kv.rf.Start(op)
-	//fmt.Printf("%v Get after append to leader\n",kv.me)
+// try append op to raft and wait for callback
+func (kv *KVServer) appendRequest(op *Op) Err {
+	index, _, isLeader := kv.rf.Start(*op)
 	if !isLeader {
-		reply.WrongLeader = true
-		return
+		return "wrong leader"
 	}
-	reply.WrongLeader = false
-
-	timeout := time.NewTimer(time.Millisecond*time.Duration(TIMEOUT))
-	//fmt.Printf("%v get to aquire lock\n",kv.me)
 	kv.mu.Lock()
-	//fmt.Printf("%v get got lock\n",kv.me)
-	notify ,ok := kv.notifyCH[index]
+	notify, ok := kv.notifyCH[index]
 	if !ok {
 		notify = make(chan bool, 1)
 		kv.notifyCH[index] = notify
 	}
 	kv.mu.Unlock()
 	select {
-	case <- timeout.C:
-		reply.Err = "timeout"
-	case valid := <- notify:
-		//fmt.Printf("notified get")
+	case <-time.After(time.Millisecond * TIMEOUT):
+		return "timeout"
+	case valid := <-notify:          // applied
 		if valid {
-			kv.mu.Lock()
-			reply.Value = kv.db[args.Key]
-			kv.mu.Unlock()
-			//fmt.Printf("return %v %v\n",args.Key, reply.Value)
+			return ""
 		} else {
-			reply.Err = "append error"
+			return "append error"
 		}
 	}
-	//fmt.Printf("%v return get\n",kv.me)
+}
+
+func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	// Your code here.
+	op := Op{"Get", args.Key, "", args.Client, args.Seq}
+
+	reply.Err = kv.appendRequest(&op)
+	reply.WrongLeader = false
+	if reply.Err == "" {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		reply.Value = kv.db[op.Key]
+	} else if reply.Err == "wrong leader" {
+		reply.WrongLeader = true
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 
-	// this request is already applied before
-	//kv.mu.Lock()
-	//if seq,ok := kv.lastApply[args.Client];ok&&seq==args.Seq {
-	//	reply.WrongLeader = false
-	//	reply.Err = ""
-	//	kv.mu.Unlock()
-	//	return
-	//}
-	//kv.mu.Unlock()
-
 	op := Op{args.Op, args.Key, args.Value, args.Client, args.Seq}
-	//fmt.Printf("server %v try %v %v %v\n",kv.me, op.Operation, op.Key,op.Value)
-	index, _, isLeader := kv.rf.Start(op)
-	//fmt.Printf("server %v put after start\n",kv.me)
-	if !isLeader {
+	reply.Err = kv.appendRequest(&op)
+	if reply.Err == "wrong leader" {
 		reply.WrongLeader = true
-		//fmt.Printf("%v is not leader\n",kv.me)
-		return
 	}
 	reply.WrongLeader = false
-
-	timeout := time.NewTimer(time.Millisecond*time.Duration(TIMEOUT))
-
-	//fmt.Printf("%v try lock\n",kv.me)
-	kv.mu.Lock()
-	//fmt.Printf("%v lock success\n",kv.me)
-
-	notify ,ok := kv.notifyCH[index]
-	if !ok {
-		notify = make(chan bool, 1)
-		kv.notifyCH[index] = notify
-	}
-	kv.mu.Unlock()
-	//fmt.Printf("%v wait notify\n",kv.me)
-	select {
-	case <- timeout.C:
-		reply.Err = "timeout"
-		//fmt.Printf("%v timeout\n",kv.me)
-	case valid := <- notify:
-		//fmt.Printf("%v notify put\n",kv.me)
-		if !valid {
-			//fmt.Printf("%v append error\n",kv.me)
-			reply.Err = "append error"
-		}
-	}
-	//fmt.Printf("%v put return\n",kv.me)
 }
 
 //
@@ -197,27 +147,22 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 func (kv *KVServer) applyDaemon() {
 	for {
-		//fmt.Printf("%v get msg from channel\n",kv.me)
 		msg := <-kv.applyCh
-		//fmt.Printf("%v got msg from channel\n",kv.me)
 		kv.mu.Lock()
-		//fmt.Printf("%v got lock after got msg\n",kv.me)
 		if ch, ok := kv.notifyCH[msg.CommandIndex]; ok {
-			if len(ch)==0 {
+			if len(ch) == 0 {
 				ch <- msg.CommandValid
 			} else {
-				delete(kv.notifyCH, msg.CommandIndex)    // the waiting request already returned
+				delete(kv.notifyCH, msg.CommandIndex) // the waiting request already returned
 			}
 		}
-		//fmt.Printf("%v before command valid\n", kv.me)
 
 		if msg.CommandValid {
 			op := msg.Command.(Op)
-			if seq, ok:=kv.lastApply[op.Client];!ok||seq!=op.Seq {
+			if seq, ok := kv.lastApply[op.Client]; !ok || seq != op.Seq {
 				switch op.Operation {
 				case "Get":
 				case "Put":
-					//fmt.Printf("%v put %v %v\n", kv.me, op.Key, op.Value)
 					kv.db[op.Key] = op.Value
 				case "Append":
 					kv.db[op.Key] += op.Value
@@ -226,6 +171,5 @@ func (kv *KVServer) applyDaemon() {
 			}
 		}
 		kv.mu.Unlock()
-		//fmt.Printf("%v unlock after apply\n",kv.me)
 	}
 }

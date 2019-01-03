@@ -11,9 +11,9 @@ var clientId int
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	leader  int
-	id      int
-	seq     uint64
+	leader int
+	id     int
+	seq    uint64
 }
 
 func nrand() int64 {
@@ -54,17 +54,15 @@ func (ck *Clerk) Get(key string) string {
 	leader := ck.leader
 	for {
 		var reply GetReply
-		//fmt.Printf("now client %v call %v to get %v\n",ck.id, leader, key)
 		if ck.servers[leader].Call("KVServer.Get", &args, &reply) {
-			//fmt.Printf("client %v get return from %v\n",ck.id,leader)
 			if !reply.WrongLeader {
 				ck.leader = leader
-				if reply.Err=="" {
+				if reply.Err == "" {
 					return reply.Value
 				}
 			}
 		}
-		leader = (leader +1) % len(ck.servers)    // can't reach leader
+		leader = (leader + 1) % len(ck.servers) // can't reach leader
 	}
 }
 
@@ -86,22 +84,19 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	leader := ck.leader
 	for {
 		var reply PutAppendReply
-		//fmt.Printf("now client %v call %v to put %v %v\n",ck.id, leader, key, value)
 		if ck.servers[leader].Call("KVServer.PutAppend", &args, &reply) {
-			//fmt.Printf("get put reply from %v\n",ck.leader)
 			if !reply.WrongLeader {
 				ck.leader = leader
-				if reply.Err=="" {
+				if reply.Err == "" {
 					return
 				}
 			}
 		}
-		leader = (leader +1) % len(ck.servers)    // can't reach leader
+		leader = (leader + 1) % len(ck.servers) // can't reach leader
 	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	//fmt.Printf("client put %v %v\n",key,value)
 	ck.PutAppend(key, value, "Put")
 }
 func (ck *Clerk) Append(key string, value string) {
