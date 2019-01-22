@@ -61,7 +61,7 @@ func (kv *KVServer) appendRequest(op *Op) Err {
 	select {
 	case <-time.After(time.Millisecond * TIMEOUT):
 		return "timeout"
-	case valid := <-notify:          // applied
+	case valid := <-notify: // applied
 		if valid {
 			return ""
 		} else {
