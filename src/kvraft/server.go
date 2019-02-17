@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"bytes"
 	"labgob"
 	"labrpc"
 	"log"
@@ -41,8 +42,9 @@ type KVServer struct {
 
 	// Your definitions here.
 	db        map[string]string
-	notifyCH  map[int]chan bool // notify command is applied
+	notifyCH  map[int]chan bool // notify while command has been applied
 	lastApply map[int]uint64
+	persister *raft.Persister
 }
 
 // try append op to raft and wait for callback
@@ -129,7 +131,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-
+	//kv.maxraftstate = -1
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
@@ -137,6 +139,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.notifyCH = make(map[int]chan bool)
 	kv.db = make(map[string]string)
 	kv.lastApply = make(map[int]uint64)
+	kv.persister = persister
 
 	// You may need initialization code here.
 
@@ -158,18 +161,45 @@ func (kv *KVServer) applyDaemon() {
 		}
 
 		if msg.CommandValid {
-			op := msg.Command.(Op)
-			if seq, ok := kv.lastApply[op.Client]; !ok || seq != op.Seq {
-				switch op.Operation {
-				case "Get":
-				case "Put":
-					kv.db[op.Key] = op.Value
-				case "Append":
-					kv.db[op.Key] += op.Value
+			if msg.CommandIndex == -1 {
+				kv.restoreSnapshot()
+			} else if msg.Command!=nil {
+				op := msg.Command.(Op)
+				if seq, ok := kv.lastApply[op.Client]; !ok || seq != op.Seq {
+					switch op.Operation {
+					case "Get":
+					case "Put":
+						kv.db[op.Key] = op.Value
+					case "Append":
+						kv.db[op.Key] += op.Value
+					}
+					kv.lastApply[op.Client] = op.Seq
 				}
-				kv.lastApply[op.Client] = op.Seq
 			}
+			kv.maySnapshot(msg.CommandIndex, msg.CommandTerm)
 		}
 		kv.mu.Unlock()
+	}
+}
+
+func (kv *KVServer) maySnapshot(lastIndex int, lastTerm int){
+	if kv.maxraftstate==-1 || kv.persister.RaftStateSize()<=kv.maxraftstate{
+		return
+	}
+	buffer := new(bytes.Buffer)
+	e:=labgob.NewEncoder(buffer)
+	e.Encode(lastIndex)
+	e.Encode(lastTerm)
+	e.Encode(kv.db)
+	e.Encode(kv.lastApply)
+	kv.rf.Snapshot(lastIndex, lastTerm, buffer.Bytes())
+}
+
+func (kv *KVServer) restoreSnapshot(){
+	buffer := bytes.NewBuffer(kv.persister.ReadSnapshot())
+	d:=labgob.NewDecoder(buffer)
+	var lastIndex, lastTerm int
+	if d.Decode(&lastIndex)!=nil || d.Decode(&lastTerm)!=nil || d.Decode(&kv.db)!=nil || d.Decode(&kv.lastApply)!=nil {
+		log.Panicln("restore snapshot error")
 	}
 }
