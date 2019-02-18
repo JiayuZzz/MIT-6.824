@@ -163,7 +163,7 @@ func (kv *KVServer) applyDaemon() {
 		if msg.CommandValid {
 			if msg.CommandIndex == -1 {
 				kv.restoreSnapshot()
-			} else if msg.Command!=nil {
+			} else if msg.Command != nil {
 				op := msg.Command.(Op)
 				if seq, ok := kv.lastApply[op.Client]; !ok || seq != op.Seq {
 					switch op.Operation {
@@ -182,24 +182,26 @@ func (kv *KVServer) applyDaemon() {
 	}
 }
 
-func (kv *KVServer) maySnapshot(lastIndex int, lastTerm int){
-	if kv.maxraftstate==-1 || kv.persister.RaftStateSize()<=kv.maxraftstate{
+func (kv *KVServer) maySnapshot(lastIndex int, lastTerm int) {
+	if kv.maxraftstate == -1 || kv.persister.RaftStateSize() <= kv.maxraftstate {
 		return
 	}
 	buffer := new(bytes.Buffer)
-	e:=labgob.NewEncoder(buffer)
+	e := labgob.NewEncoder(buffer)
 	e.Encode(lastIndex)
 	e.Encode(lastTerm)
 	e.Encode(kv.db)
 	e.Encode(kv.lastApply)
-	kv.rf.Snapshot(lastIndex, lastTerm, buffer.Bytes())
+	//fmt.Printf("%d try snapshot\n",kv.me)
+	go kv.rf.Snapshot(lastIndex, lastTerm, buffer.Bytes())
+	//fmt.Printf("%d snapshot done\n",kv.me)
 }
 
-func (kv *KVServer) restoreSnapshot(){
+func (kv *KVServer) restoreSnapshot() {
 	buffer := bytes.NewBuffer(kv.persister.ReadSnapshot())
-	d:=labgob.NewDecoder(buffer)
+	d := labgob.NewDecoder(buffer)
 	var lastIndex, lastTerm int
-	if d.Decode(&lastIndex)!=nil || d.Decode(&lastTerm)!=nil || d.Decode(&kv.db)!=nil || d.Decode(&kv.lastApply)!=nil {
+	if d.Decode(&lastIndex) != nil || d.Decode(&lastTerm) != nil || d.Decode(&kv.db) != nil || d.Decode(&kv.lastApply) != nil {
 		log.Panicln("restore snapshot error")
 	}
 }

@@ -126,6 +126,9 @@ func (rf *Raft) Snapshot(lastIndex int, lastTerm int, data []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//fmt.Printf("%v snapshot\n",rf.me)
+	if lastIndex < rf.baseIndex {  // expired snapshot
+		return
+	}
 	if lastIndex > rf.lastIndex() {
 		rf.log = make([]LogEntry, 1)
 		rf.log[0] = LogEntry{
@@ -134,6 +137,7 @@ func (rf *Raft) Snapshot(lastIndex int, lastTerm int, data []byte) {
 			nil,
 		}
 	} else {
+		//fmt.Printf("%d %d\n",rf.indexToOffset(lastIndex),len(rf.log))
 		rf.log = rf.log[rf.indexToOffset(lastIndex):]
 	}
 	rf.baseIndex = lastIndex
@@ -355,7 +359,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if args.LeaderCommit > rf.commitIndex && prevEntryMatch {
+		//fmt.Printf("%d before commit\n",rf.me)
 		rf.commitToIndex(min(args.LeaderCommit, lastMatch))
+		//fmt.Printf("%d after commit\n",rf.me)
 	}
 }
 
@@ -508,12 +514,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		nil,
 	}
 	rf.matchIndex = make([]int, len(rf.peers))
-	rf.commitIndex = 0
 	rf.applyCh = applyCh
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	if len(rf.persister.ReadSnapshot())>0 {
+		go rf.restoreSnapshot()
+	}
 	rf.baseIndex = rf.log[0].Index
+	rf.commitIndex = rf.baseIndex
+	//fmt.Printf("server %d start, commit index: %d\n",rf.me, rf.commitIndex)
 	rf.resetTimer()
 	//fmt.Printf("%v maked\n",rf.me)
 	go rf.electionDaemon()
@@ -538,8 +548,10 @@ func (rf *Raft) electionDaemon() {
 	for {
 		select {
 		case <-rf.resetTimerCH:
+			//fmt.Printf("%d reset timer\n",rf.me)
 			rf.resetTimer()
 		case <-rf.electionTimer.C:
+			//fmt.Printf("%d timeout\n",rf.me)
 			rf.resetTimer()
 			go rf.startElection()
 		}
@@ -649,6 +661,7 @@ func (rf *Raft) broadcast() {
 			rf.mu.Unlock()
 			return
 		}
+		//fmt.Printf("%d broadcast\n",rf.me)
 		for i := range rf.peers {
 			if i == rf.me {
 				continue
@@ -717,14 +730,18 @@ func (rf *Raft) tryCommit() {
 	majority := matchState[len(matchState)/2] // match index of majority
 	// only commit current term's entry
 	if rf.getEntry(majority).Term == rf.currentTerm {
+		//fmt.Printf("%d leader: %v, try commit %d\n",rf.me,rf.role==Leader,majority)
 		rf.commitToIndex(majority)
+		//fmt.Printf("%d done commit\n",rf.me)
+
 	}
 }
 
 // commit index and all indices preceding index
 func (rf *Raft) commitToIndex(index int) {
 	if rf.commitIndex < index {
-		for i := rf.commitIndex + 1; i <= index && i <= rf.lastIndex(); i++ {
+		for i:=max(rf.commitIndex+1,rf.baseIndex); i <= index && i <= rf.lastIndex(); i++ {
+			//fmt.Printf("%d commit %d\n",rf.me, i)
 			rf.commitIndex = i
 			msg := ApplyMsg{
 				true,
@@ -733,8 +750,9 @@ func (rf *Raft) commitToIndex(index int) {
 				rf.getEntry(i).Term,
 			}
 			DPrintf("server %v set commit to index %v", rf.me, rf.commitIndex)
-			//fmt.Printf("%v send msg to channel\n",rf.me)
+			//fmt.Printf("%v send msg %d to channel\n",rf.me,msg.CommandIndex)
 			rf.applyCh <- msg
+			//fmt.Printf("%d commit %d done\n",rf.me,i)
 			//fmt.Printf("%v send msg to channel done\n",rf.me)
 		}
 	}
@@ -758,6 +776,7 @@ func (rf *Raft) indexToOffset(index int) int {
 }
 
 func (rf *Raft) getEntry(index int) *LogEntry {
+	//fmt.Printf("%d get entry, index:%d, offset:%d, last index:%d\n", rf.me, index, rf.indexToOffset(index), rf.lastIndex())
 	return &rf.log[rf.indexToOffset(index)]
 }
 
@@ -766,5 +785,13 @@ func min(a int, b int) int {
 		return a
 	} else {
 		return b
+	}
+}
+
+func max(a int, b int) int {
+	if a < b {
+		return b
+	} else {
+		return a
 	}
 }
