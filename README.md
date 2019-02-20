@@ -8,7 +8,7 @@
 
 - [x] Lab2: Raft
 
-- [ ] Lab3: K/V Raft
+- [x] Lab3: K/V Raft
 
 - [ ] Lab4: Sharded KV
 

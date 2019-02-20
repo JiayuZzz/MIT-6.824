@@ -332,7 +332,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 
 	lastMatch := 0 // last entry matched
-	prevEntryMatch := args.PrevLogIndex <= rf.lastIndex() && rf.getEntry(args.PrevLogIndex).Term == args.PrevLogTerm
+	prevEntryMatch := args.PrevLogIndex <= rf.lastIndex() && args.PrevLogIndex>=rf.baseIndex && rf.getEntry(args.PrevLogIndex).Term == args.PrevLogTerm
 
 	if prevEntryMatch {
 		lastMatch = args.PrevLogIndex
@@ -344,18 +344,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			DPrintf("server %v receive entry term %v, at index: %v\n", rf.me, args.Term, len(rf.log)-1)
 		}
 	} else {
-		// to find nextIndex
-		index := args.PrevLogIndex
-		if args.PrevLogIndex <= rf.lastIndex() {
-			// search the first entry on unmatched term
-			term := rf.getEntry(index).Term
-			for term == rf.getEntry(index - 1).Term && index > rf.baseIndex+1 {
-				index -= 1
+		if args.PrevLogIndex >= rf.baseIndex {
+			// to find nextIndex
+			index := args.PrevLogIndex
+			if args.PrevLogIndex <= rf.lastIndex() {
+				// search the first entry on unmatched term
+				term := rf.getEntry(index).Term
+				for index > rf.baseIndex+1 && term == rf.getEntry(index - 1).Term {
+					index -= 1
+				}
+			} else {
+				index = rf.lastIndex() + 1
 			}
+			reply.FirstIndex = index
 		} else {
-			index = rf.lastIndex() + 1
+			reply.FirstIndex = rf.lastIndex()
 		}
-		reply.FirstIndex = index
 	}
 
 	if args.LeaderCommit > rf.commitIndex && prevEntryMatch {
@@ -740,7 +744,7 @@ func (rf *Raft) tryCommit() {
 // commit index and all indices preceding index
 func (rf *Raft) commitToIndex(index int) {
 	if rf.commitIndex < index {
-		for i:=max(rf.commitIndex+1,rf.baseIndex); i <= index && i <= rf.lastIndex(); i++ {
+		for i:=rf.commitIndex+1; i <= index && i <= rf.lastIndex(); i++ {
 			//fmt.Printf("%d commit %d\n",rf.me, i)
 			rf.commitIndex = i
 			msg := ApplyMsg{
